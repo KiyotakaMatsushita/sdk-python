@@ -957,7 +957,6 @@ async def test_stream_output_guardrails_redacts_input_and_output(
 
     tru_chunks = await alist(response)
     exp_chunks = [
-        {"redactContent": {"redactUserContentMessage": "[User input redacted.]"}},
         {"redactContent": {"redactAssistantContentMessage": "[Assistant output redacted.]"}},
         metadata_event,
     ]
@@ -1292,7 +1291,11 @@ async def test_stream_input_guardrails(bedrock_client, alist, messages):
 
 @pytest.mark.asyncio
 async def test_stream_output_guardrails(bedrock_client, alist, messages):
-    """Test stream method with streaming=False."""
+    """Test stream method with streaming=False and output guardrail triggered.
+
+    When only output guardrail is triggered and guardrail_redact_input is True (default),
+    no redaction event should be generated because the input was not blocked.
+    """
     bedrock_client.converse.return_value = {
         "output": {"message": {"role": "assistant", "content": [{"text": "test"}]}},
         "trace": {
@@ -1335,7 +1338,6 @@ async def test_stream_output_guardrails(bedrock_client, alist, messages):
                 }
             }
         },
-        {"redactContent": {"redactUserContentMessage": "[User input redacted.]"}},
     ]
     assert tru_events == exp_events
 
@@ -1345,7 +1347,11 @@ async def test_stream_output_guardrails(bedrock_client, alist, messages):
 
 @pytest.mark.asyncio
 async def test_stream_output_guardrails_redacts_output(bedrock_client, alist, messages):
-    """Test stream method with streaming=False."""
+    """Test stream method with streaming=False and guardrail_redact_output=True.
+
+    When output guardrail is triggered and guardrail_redact_output is True,
+    only the output redaction event should be generated (not input redaction).
+    """
     bedrock_client.converse.return_value = {
         "output": {"message": {"role": "assistant", "content": [{"text": "test"}]}},
         "trace": {
@@ -1362,7 +1368,7 @@ async def test_stream_output_guardrails_redacts_output(bedrock_client, alist, me
         "stopReason": "end_turn",
     }
 
-    model = BedrockModel(model_id="test-model", streaming=False)
+    model = BedrockModel(model_id="test-model", streaming=False, guardrail_redact_output=True)
     response = model.stream(messages)
 
     tru_events = await alist(response)
@@ -1388,7 +1394,7 @@ async def test_stream_output_guardrails_redacts_output(bedrock_client, alist, me
                 }
             }
         },
-        {"redactContent": {"redactUserContentMessage": "[User input redacted.]"}},
+        {"redactContent": {"redactAssistantContentMessage": "[Assistant output redacted.]"}},
     ]
     assert tru_events == exp_events
 

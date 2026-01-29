@@ -639,16 +639,28 @@ class BedrockModel(Model):
 
         return False
 
-    def _generate_redaction_events(self) -> list[StreamEvent]:
-        """Generate redaction events based on configuration.
+    def _generate_redaction_events(self, guardrail_data: dict[str, Any]) -> list[StreamEvent]:
+        """Generate redaction events based on configuration and triggered guardrails.
+
+        Args:
+            guardrail_data: Dictionary containing guardrail assessment data from the API response.
 
         Returns:
             List of redaction events to yield.
         """
         events: list[StreamEvent] = []
 
-        if self.config.get("guardrail_redact_input", True):
-            logger.debug("Redacting user input due to guardrail.")
+        input_blocked = any(
+            self._find_detected_and_blocked_policy(assessment)
+            for assessment in guardrail_data.get("inputAssessment", {}).values()
+        )
+        output_blocked = any(
+            self._find_detected_and_blocked_policy(assessment)
+            for assessment in guardrail_data.get("outputAssessments", {}).values()
+        )
+
+        if input_blocked and self.config.get("guardrail_redact_input", True):
+            logger.debug("Redacting user input due to input guardrail.")
             events.append(
                 {
                     "redactContent": {
@@ -659,8 +671,8 @@ class BedrockModel(Model):
                 }
             )
 
-        if self.config.get("guardrail_redact_output", False):
-            logger.debug("Redacting assistant output due to guardrail.")
+        if output_blocked and self.config.get("guardrail_redact_output", False):
+            logger.debug("Redacting assistant output due to output guardrail.")
             events.append(
                 {
                     "redactContent": {
@@ -775,7 +787,7 @@ class BedrockModel(Model):
                     ):
                         guardrail_data = chunk["metadata"]["trace"]["guardrail"]
                         if self._has_blocked_guardrail(guardrail_data):
-                            for event in self._generate_redaction_events():
+                            for event in self._generate_redaction_events(guardrail_data):
                                 callback(event)
 
                     # Track if we see tool use events
@@ -807,7 +819,7 @@ class BedrockModel(Model):
                     and "guardrail" in response["trace"]
                     and self._has_blocked_guardrail(response["trace"]["guardrail"])
                 ):
-                    for event in self._generate_redaction_events():
+                    for event in self._generate_redaction_events(response["trace"]["guardrail"]):
                         callback(event)
 
         except ClientError as e:
