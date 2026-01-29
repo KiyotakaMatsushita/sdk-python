@@ -130,6 +130,45 @@ def test_guardrail_input_intervention(boto_session, bedrock_guardrail, guardrail
     assert agent.messages[0]["content"][0]["text"] == "Redacted."
 
 
+@pytest.mark.parametrize("guardrail_trace", ["enabled", "enabled_full"])
+def test_guardrail_input_intervention_with_both_redact_options(boto_session, bedrock_guardrail, guardrail_trace):
+    """Test that input guardrail shows correct message when both redact options are enabled.
+
+    This test reproduces GitHub issue #1324: when both guardrail_redact_input=True and
+    guardrail_redact_output=True are set, triggering an INPUT guardrail incorrectly
+    shows the OUTPUT redact message in the response instead of the expected behavior.
+
+    Expected behavior: When input guardrail is triggered, the response should contain
+    the blockedInputMessaging from AWS (BLOCKED_INPUT), not the output redact message.
+    """
+    INPUT_REDACT_MESSAGE = "Input was blocked by guardrail."
+    OUTPUT_REDACT_MESSAGE = "Output was blocked by guardrail."
+
+    bedrock_model = BedrockModel(
+        guardrail_id=bedrock_guardrail,
+        guardrail_version="DRAFT",
+        boto_session=boto_session,
+        guardrail_trace=guardrail_trace,
+        guardrail_redact_input=True,
+        guardrail_redact_input_message=INPUT_REDACT_MESSAGE,
+        guardrail_redact_output=True,  # This setting triggers the bug
+        guardrail_redact_output_message=OUTPUT_REDACT_MESSAGE,
+    )
+
+    agent = Agent(model=bedrock_model, system_prompt="You are a helpful assistant.", callback_handler=None)
+
+    # Trigger INPUT guardrail with "CACTUS"
+    response = agent("CACTUS")
+
+    assert response.stop_reason == "guardrail_intervened"
+    # User message should be redacted with INPUT_REDACT_MESSAGE
+    assert agent.messages[0]["content"][0]["text"] == INPUT_REDACT_MESSAGE
+    # Response should contain AWS's blockedInputMessaging (BLOCKED_INPUT), not OUTPUT_REDACT_MESSAGE
+    # Bug: Currently the response contains OUTPUT_REDACT_MESSAGE instead of BLOCKED_INPUT
+    assert OUTPUT_REDACT_MESSAGE not in str(response)
+    assert BLOCKED_INPUT in str(response)
+
+
 @pytest.mark.parametrize("processing_mode", ["sync", "async"])
 def test_guardrail_output_intervention(boto_session, bedrock_guardrail, processing_mode):
     bedrock_model = BedrockModel(
