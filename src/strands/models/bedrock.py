@@ -84,6 +84,8 @@ class BedrockModel(Model):
             guardrail_redact_input_message: If a Bedrock Input guardrail triggers, replace the input with this message.
             guardrail_redact_output: Flag to redact output if guardrail is triggered. Defaults to False.
             guardrail_redact_output_message: If a Bedrock Output guardrail triggers, replace output with this message.
+            guardrail_use_aws_blocked_message: If True, use Bedrock's blockedInputMessaging/blockedOutputMessaging
+                instead of SDK's guardrail_redact_*_message for redaction. Defaults to False.
             guardrail_latest_message: Flag to send only the lastest user message to guardrails.
                 Defaults to False.
             max_tokens: Maximum number of tokens to generate in the response
@@ -110,6 +112,7 @@ class BedrockModel(Model):
         guardrail_redact_input_message: str | None
         guardrail_redact_output: bool | None
         guardrail_redact_output_message: str | None
+        guardrail_use_aws_blocked_message: bool | None
         guardrail_latest_message: bool | None
         max_tokens: int | None
         model_id: str
@@ -639,11 +642,15 @@ class BedrockModel(Model):
 
         return False
 
-    def _generate_redaction_events(self, guardrail_data: dict[str, Any]) -> list[StreamEvent]:
+    def _generate_redaction_events(
+        self, guardrail_data: dict[str, Any], blocked_message: str | None = None
+    ) -> list[StreamEvent]:
         """Generate redaction events based on configuration and triggered guardrails.
 
         Args:
             guardrail_data: Dictionary containing guardrail assessment data from the API response.
+            blocked_message: The blocked message returned by Bedrock (blockedInputMessaging or
+                blockedOutputMessaging). Used when guardrail_use_aws_blocked_message is True.
 
         Returns:
             List of redaction events to yield.
@@ -659,30 +666,25 @@ class BedrockModel(Model):
             for assessment in guardrail_data.get("outputAssessments", {}).values()
         )
 
+        use_aws_message = self.config.get("guardrail_use_aws_blocked_message", False)
+
         if input_blocked and self.config.get("guardrail_redact_input", True):
             logger.debug("Redacting user input due to input guardrail.")
-            events.append(
-                {
-                    "redactContent": {
-                        "redactUserContentMessage": self.config.get(
-                            "guardrail_redact_input_message", "[User input redacted.]"
-                        )
-                    }
-                }
-            )
+            if use_aws_message and blocked_message:
+                redact_input_message = blocked_message
+            else:
+                redact_input_message = self.config.get("guardrail_redact_input_message", "[User input redacted.]")
+            events.append({"redactContent": {"redactUserContentMessage": redact_input_message}})
 
         if output_blocked and self.config.get("guardrail_redact_output", False):
             logger.debug("Redacting assistant output due to output guardrail.")
-            events.append(
-                {
-                    "redactContent": {
-                        "redactAssistantContentMessage": self.config.get(
-                            "guardrail_redact_output_message",
-                            "[Assistant output redacted.]",
-                        )
-                    }
-                }
-            )
+            if use_aws_message and blocked_message:
+                redact_output_message = blocked_message
+            else:
+                redact_output_message = self.config.get(
+                    "guardrail_redact_output_message", "[Assistant output redacted.]"
+                )
+            events.append({"redactContent": {"redactAssistantContentMessage": redact_output_message}})
 
         return events
 
@@ -779,7 +781,15 @@ class BedrockModel(Model):
                 response = self.client.converse_stream(**request)
                 # Track tool use events to fix stopReason for streaming responses
                 has_tool_use = False
+                # Collect text chunks to get the blocked message for guardrail redaction
+                collected_text_parts: list[str] = []
                 for chunk in response["stream"]:
+                    # Collect text from contentBlockDelta for potential guardrail blocked message
+                    if "contentBlockDelta" in chunk:
+                        delta = chunk["contentBlockDelta"].get("delta", {})
+                        if "text" in delta:
+                            collected_text_parts.append(delta["text"])
+
                     if (
                         "metadata" in chunk
                         and "trace" in chunk["metadata"]
@@ -787,7 +797,8 @@ class BedrockModel(Model):
                     ):
                         guardrail_data = chunk["metadata"]["trace"]["guardrail"]
                         if self._has_blocked_guardrail(guardrail_data):
-                            for event in self._generate_redaction_events(guardrail_data):
+                            blocked_message = "".join(collected_text_parts) if collected_text_parts else None
+                            for event in self._generate_redaction_events(guardrail_data, blocked_message):
                                 callback(event)
 
                     # Track if we see tool use events
@@ -819,7 +830,14 @@ class BedrockModel(Model):
                     and "guardrail" in response["trace"]
                     and self._has_blocked_guardrail(response["trace"]["guardrail"])
                 ):
-                    for event in self._generate_redaction_events(response["trace"]["guardrail"]):
+                    # Extract blocked message from response content
+                    blocked_message = None
+                    content = response.get("output", {}).get("message", {}).get("content", [])
+                    if content and isinstance(content, list) and len(content) > 0:
+                        first_block = content[0]
+                        if isinstance(first_block, dict) and "text" in first_block:
+                            blocked_message = first_block["text"]
+                    for event in self._generate_redaction_events(response["trace"]["guardrail"], blocked_message):
                         callback(event)
 
         except ClientError as e:

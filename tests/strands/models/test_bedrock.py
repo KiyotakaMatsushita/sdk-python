@@ -1403,6 +1403,164 @@ async def test_stream_output_guardrails_redacts_output(bedrock_client, alist, me
 
 
 @pytest.mark.asyncio
+async def test_stream_output_guardrails_use_aws_blocked_message(bedrock_client, alist, messages):
+    """Test that guardrail_use_aws_blocked_message uses Bedrock's blocked message for redaction."""
+    aws_blocked_message = "[AWS] AI response was blocked by guardrail"
+    bedrock_client.converse.return_value = {
+        "output": {"message": {"role": "assistant", "content": [{"text": aws_blocked_message}]}},
+        "trace": {
+            "guardrail": {
+                "outputAssessments": {
+                    "3e59qlue4hag": [
+                        {
+                            "wordPolicy": {"customWords": [{"match": "CACTUS", "action": "BLOCKED", "detected": True}]},
+                        }
+                    ]
+                },
+            }
+        },
+        "stopReason": "guardrail_intervened",
+    }
+
+    model = BedrockModel(
+        model_id="test-model", streaming=False, guardrail_redact_output=True, guardrail_use_aws_blocked_message=True
+    )
+    response = model.stream(messages)
+
+    tru_events = await alist(response)
+    exp_events = [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockDelta": {"delta": {"text": aws_blocked_message}}},
+        {"contentBlockStop": {}},
+        {"messageStop": {"stopReason": "guardrail_intervened", "additionalModelResponseFields": None}},
+        {
+            "metadata": {
+                "trace": {
+                    "guardrail": {
+                        "outputAssessments": {
+                            "3e59qlue4hag": [
+                                {
+                                    "wordPolicy": {
+                                        "customWords": [{"match": "CACTUS", "action": "BLOCKED", "detected": True}]
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        {"redactContent": {"redactAssistantContentMessage": aws_blocked_message}},
+    ]
+    assert tru_events == exp_events
+
+    bedrock_client.converse.assert_called_once()
+    bedrock_client.converse_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_input_guardrails_use_aws_blocked_message(bedrock_client, alist, messages):
+    """Test that guardrail_use_aws_blocked_message uses Bedrock's blocked message for input redaction."""
+    aws_blocked_message = "[AWS] Your input was blocked by guardrail"
+    bedrock_client.converse.return_value = {
+        "output": {"message": {"role": "assistant", "content": [{"text": aws_blocked_message}]}},
+        "trace": {
+            "guardrail": {
+                "inputAssessment": {
+                    "3e59qlue4hag": {
+                        "wordPolicy": {"customWords": [{"match": "CACTUS", "action": "BLOCKED", "detected": True}]}
+                    }
+                }
+            }
+        },
+        "stopReason": "guardrail_intervened",
+    }
+
+    model = BedrockModel(model_id="test-model", streaming=False, guardrail_use_aws_blocked_message=True)
+    response = model.stream(messages)
+
+    tru_events = await alist(response)
+    exp_events = [
+        {"messageStart": {"role": "assistant"}},
+        {"contentBlockDelta": {"delta": {"text": aws_blocked_message}}},
+        {"contentBlockStop": {}},
+        {"messageStop": {"stopReason": "guardrail_intervened", "additionalModelResponseFields": None}},
+        {
+            "metadata": {
+                "trace": {
+                    "guardrail": {
+                        "inputAssessment": {
+                            "3e59qlue4hag": {
+                                "wordPolicy": {
+                                    "customWords": [{"match": "CACTUS", "action": "BLOCKED", "detected": True}]
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        {"redactContent": {"redactUserContentMessage": aws_blocked_message}},
+    ]
+    assert tru_events == exp_events
+
+    bedrock_client.converse.assert_called_once()
+    bedrock_client.converse_stream.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stream_streaming_guardrails_use_aws_blocked_message(
+    bedrock_client, model, messages, tool_spec, model_id, additional_request_fields, alist
+):
+    """Test that guardrail_use_aws_blocked_message works with streaming mode."""
+    aws_blocked_message = "[AWS] AI response was blocked by guardrail"
+    model.update_config(guardrail_redact_output=True, guardrail_use_aws_blocked_message=True)
+    metadata_event = {
+        "metadata": {
+            "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+            "metrics": {"latencyMs": 245},
+            "trace": {
+                "guardrail": {
+                    "outputAssessments": {
+                        "3e59qlue4hag": [
+                            {
+                                "wordPolicy": {
+                                    "customWords": [
+                                        {
+                                            "match": "CACTUS",
+                                            "action": "BLOCKED",
+                                            "detected": True,
+                                        }
+                                    ]
+                                },
+                            }
+                        ]
+                    },
+                }
+            },
+        }
+    }
+    bedrock_client.converse_stream.return_value = {
+        "stream": [
+            {"contentBlockDelta": {"delta": {"text": aws_blocked_message}}},
+            metadata_event,
+        ]
+    }
+
+    model.update_config(additional_request_fields=additional_request_fields)
+    response = model.stream(messages, [tool_spec])
+
+    tru_chunks = await alist(response)
+    exp_chunks = [
+        {"contentBlockDelta": {"delta": {"text": aws_blocked_message}}},
+        {"redactContent": {"redactAssistantContentMessage": aws_blocked_message}},
+        metadata_event,
+    ]
+
+    assert tru_chunks == exp_chunks
+
+
+@pytest.mark.asyncio
 async def test_structured_output(bedrock_client, model, test_output_model_cls, alist):
     messages = [{"role": "user", "content": [{"text": "Generate a person"}]}]
 
